@@ -1,0 +1,168 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: AWS CloudFormation template for Image Handler
+
+Parameters:
+  S3BucketName:
+    Type: String
+    Description: Name of the S3 bucket to store the uploaded images
+
+Resources:
+  ImageBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref S3BucketName
+
+  ImageUploadFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: ImageUploadFunction
+      Runtime: nodejs14.x
+      Handler: index.handler
+      Code:
+        ZipFile: |
+          const AWS = require('aws-sdk');
+          const S3 = new AWS.S3();
+          
+          exports.handler = async (event, context) => {
+            const bucketName = event.Records[0].s3.bucket.name;
+            const objectKey = event.Records[0].s3.object.key;
+            const response = {
+              statusCode: 200,
+              body: JSON.stringify({
+                message: 'Image uploaded successfully',
+                bucket: bucketName,
+                key: objectKey
+              })
+            };
+            return response;
+          }
+      Role: !GetAtt ImageUploadFunctionRole.Arn
+
+  ImageUploadFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ImageUploadFunctionRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: !Sub 'arn:aws:s3:::${ImageBucket}/uploads/*'
+
+  ImageProcessingFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: ImageProcessingFunction
+      Runtime: nodejs14.x
+      Handler: index.handler
+      Code:
+        ZipFile: |
+          const AWS = require('aws-sdk');
+          const S3 = new AWS.S3();
+          const Sharp = require('sharp');
+          
+          exports.handler = async (event, context) => {
+            const bucketName = event.bucket;
+            const objectKey = event.key;
+            
+            try {
+              // Fetch the image from S3
+              const image = await S3.getObject({ Bucket: bucketName, Key: objectKey }).promise();
+              
+              // Perform image manipulation using Sharp library
+              const processedImage = await Sharp(image.Body)
+                .resize(500, 500)
+                .grayscale()
+                .toBuffer();
+              
+              // Upload the processed image back to S3
+              await S3.putObject({ Bucket: bucketName, Key: `processed/${objectKey}`, Body: processedImage }).promise();
+              
+              const response = {
+                statusCode: 200,
+                body: JSON.stringify({
+                  message: 'Image processed and uploaded successfully',
+                  bucket: bucketName,
+                  key: `processed/${objectKey}`
+                })
+              };
+              return response;
+            } catch (error) {
+              console.log('Error:', error);
+              throw new Error('Image processing failed');
+            }
+          }
+      Role: !GetAtt ImageProcessingFunctionRole.Arn
+
+  ImageProcessingFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Role:
+RoleName: ImageProcessingFunctionRole
+AssumeRolePolicyDocument:
+Version: '2012-10-17'
+Statement:
+- Effect: Allow
+Principal:
+Service: lambda.amazonaws.com
+Action: sts:AssumeRole
+Policies:
+- PolicyName: S3Access
+PolicyDocument:
+Version: '2012-10-17'
+Statement:
+- Effect: Allow
+Action:
+- s3:GetObject
+- s3:PutObject
+Resource:
+- !Sub 'arn:aws:s3:::${ImageBucket}/uploads/'
+- !Sub 'arn:aws:s3:::${ImageBucket}/processed/'
+
+ImageProcessingApi:
+Type: AWS::ApiGateway::RestApi
+Properties:
+Name: ImageProcessingApi
+
+ImageProcessingApiResource:
+Type: AWS::ApiGateway::Resource
+Properties:
+RestApiId: !Ref ImageProcessingApi
+ParentId: !GetAtt ImageProcessingApi.RootResourceId
+PathPart: process
+
+ImageProcessingApiMethod:
+Type: AWS::ApiGateway::Method
+Properties:
+RestApiId: !Ref ImageProcessingApi
+ResourceId: !Ref ImageProcessingApiResource
+HttpMethod: POST
+AuthorizationType: NONE
+Integration:
+Type: AWS
+IntegrationHttpMethod: POST
+Uri: !Sub
+- arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations
+- FunctionArn: !GetAtt ImageProcessingFunction.Arn
+
+Outputs:
+ImageBucketName:
+Description: Name of the S3 bucket for image uploads
+Value: !Ref S3BucketName
+
+ImageProcessingApiEndpoint:
+Description: Endpoint URL of the image processing API
+Value: !Sub 'https://${ImageProcessingApi}.execute-api.${AWS::Region}.amazonaws.com'
+
+
+
